@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# 项目输出
+output/
+
+# 内部需求文档
+requires.md
+
+# 环境与密钥
+.env
+.uv-cache/
