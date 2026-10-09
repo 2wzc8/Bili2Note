@@ -1,12 +1,18 @@
 [project]
 name = "bili2note"
-version = "0.1.0"
-description = "Bilibili 视频 → AI 结构化讲义（MVP：官方字幕 → LLM 提纯 → Markdown）"
+version = "0.2.0"
+description = "Bilibili 视频 → AI 结构化讲义（字幕/音频 ASR → LLM 提纯 → Markdown）"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
     "openai>=1.40",
+    "imageio-ffmpeg>=0.5",
 ]
+
+[project.optional-dependencies]
+# 本地语音识别引擎（国内安装模型需 HF 镜像：$env:HF_ENDPOINT="https://hf-mirror.com"）
+# av<17：faster-whisper 1.2 依赖的 av.open(metadata_errors=...) 在 av 17+ 被移除
+local = ["faster-whisper>=1.0", "av>=14,<17"]
 
 [project.scripts]
 bili2note = "bili2note.cli:main"

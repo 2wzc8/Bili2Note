@@ -21,6 +21,12 @@ PROVIDERS: dict[str, dict] = {
     "zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-plus"},
 }
 
+# 云端 ASR 预设（OpenAI 兼容 /audio/transcriptions）
+ASR_PROVIDERS: dict[str, dict] = {
+    "siliconflow": {"base_url": "https://api.siliconflow.cn/v1", "model": "FunAudioLLM/SenseVoiceSmall"},
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "whisper-1"},
+}
+
 
 @dataclass
 class LLMConfig:
@@ -37,9 +43,20 @@ class BiliConfig:
 
 
 @dataclass
+class ASRConfig:
+    provider: str = "siliconflow"
+    api_key: str = ""
+    base_url: str = ""  # 空 = 取 provider 预设
+    model: str = ""     # 空 = 取 provider 预设
+    local_model: str = "small"  # faster-whisper 模型：tiny/base/small/medium/large-v3
+    language: str = ""          # 识别语言，空 = 自动检测（如 zh）
+
+
+@dataclass
 class Config:
     llm: LLMConfig
     bili: BiliConfig
+    asr: ASRConfig
 
 
 def _read_raw() -> dict:
@@ -65,7 +82,19 @@ def load_config() -> Config:
         max_tokens=int(os.environ.get(_ENV_PREFIX + "MAX_TOKENS", "") or llm_raw.get("max_tokens") or preset.get("max_tokens") or 0) or None,
     )
     bili = BiliConfig(cookie=os.environ.get(_ENV_PREFIX + "COOKIE", bili_raw.get("cookie", "")))
-    return Config(llm=llm, bili=bili)
+
+    asr_raw = raw.get("asr", {})
+    a_provider = os.environ.get(_ENV_PREFIX + "ASR_PROVIDER", asr_raw.get("provider", "siliconflow")).lower()
+    a_preset = ASR_PROVIDERS.get(a_provider, {})
+    asr = ASRConfig(
+        provider=a_provider,
+        api_key=os.environ.get(_ENV_PREFIX + "ASR_API_KEY", asr_raw.get("api_key", "")),
+        base_url=os.environ.get(_ENV_PREFIX + "ASR_BASE_URL", asr_raw.get("base_url", a_preset.get("base_url", ""))),
+        model=os.environ.get(_ENV_PREFIX + "ASR_MODEL", asr_raw.get("model", a_preset.get("model", ""))),
+        local_model=os.environ.get(_ENV_PREFIX + "ASR_LOCAL_MODEL", asr_raw.get("local_model", "small")),
+        language=os.environ.get(_ENV_PREFIX + "ASR_LANGUAGE", asr_raw.get("language", "")),
+    )
+    return Config(llm=llm, bili=bili, asr=asr)
 
 
 def _escape(value: str) -> str:

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from . import __version__
 from .bili import BiliClient, BiliError, fmt_ts, parse_video_id
-from .config import CONFIG_PATH, PROVIDERS, Config, load_config, mask, save_config
+from .config import ASR_PROVIDERS, CONFIG_PATH, PROVIDERS, Config, load_config, mask, save_config
 from .llm import generate_note
 
 
@@ -30,6 +32,50 @@ def _choose_subtitle(subs: list, index: int | None):
         if sub.lan.startswith("zh"):
             return sub
     return subs[0]
+
+
+def _resolve_asr_mode(cfg: Config, mode: str) -> str:
+    """auto = 云端（配了 key）优先，否则本地（装了 faster-whisper）。"""
+    if mode == "auto":
+        if cfg.asr.api_key:
+            return "cloud"
+        try:
+            import faster_whisper  # noqa: F401
+            return "local"
+        except ImportError:
+            raise SystemExit(
+                "该视频没有可用字幕，且 ASR 不可用。两种方案任选：\n"
+                "  云端：bili2note config asr.api_key <你的Key>（默认 siliconflow SenseVoice）\n"
+                "  本地：uv sync --extra local（faster-whisper，首次运行自动下载模型）"
+            )
+    if mode == "cloud" and not cfg.asr.api_key:
+        raise SystemExit("云端 ASR 未配置 API Key：bili2note config asr.api_key sk-xxx")
+    return mode
+
+
+def _transcript_via_asr(client: BiliClient, cfg: Config, bvid: str, page: int, mode: str) -> list[dict]:
+    """下载低码率音频 → ffmpeg 转码分片 → ASR 转写为带时间戳文本。"""
+    from .asr import transcribe_cloud, transcribe_local
+    from .audio import chunk_wavs, download_audio, full_wav
+
+    url, duration = client.audio_stream(bvid, page)
+    print(f"无可用字幕，走 ASR（{mode}）转写，时长 {fmt_ts(duration)}")
+    tmp = Path(tempfile.mkdtemp(prefix="bili2note-"))
+    try:
+        print("下载音频流（最低码率）...")
+        m4s = download_audio(url, tmp)
+        if mode == "local":
+            print(f"转码整段音频（16k mono），本地模型 {cfg.asr.local_model} 转写中（首次运行需下载模型）...")
+            return transcribe_local(full_wav(m4s, tmp), cfg.asr)
+        chunks = chunk_wavs(m4s, duration, tmp)
+        print(f"转码为 {len(chunks)} 个分片，逐片云端转写...")
+        lines: list[dict] = []
+        for wav, start, length in chunks:
+            print(f"  [{fmt_ts(start)} - {fmt_ts(start + length)}] 转写中...")
+            lines.extend(transcribe_cloud(wav, cfg.asr, offset=start, duration=length))
+        return lines
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _get_transcript(client: BiliClient, bvid: str, page: int, sub_index: int | None):
@@ -55,10 +101,30 @@ def cmd_note(args: argparse.Namespace) -> None:
     client = BiliClient(cfg.bili.cookie)
 
     print(f"获取视频信息：{bvid} P{page}")
-    info, lines = _get_transcript(client, bvid, page, args.subtitle)
-    print(f"字幕共 {len(lines)} 句，时长 {fmt_ts(lines[-1]['to'])}，开始生成讲义（模型：{cfg.llm.model}）\n")
+    info = client.video_info(bvid)
+    subs = client.subtitles(bvid, page, info=info)
 
-    text = generate_note(info, lines, cfg.llm, page=page, on_delta=sys.stdout.write)
+    if subs and args.asr not in ("cloud", "local"):
+        print("可用字幕：")
+        for i, sub in enumerate(subs, 1):
+            print(f"  {i}. {sub}")
+        sub = _choose_subtitle(subs, args.subtitle)
+        print(f"使用字幕：{sub}")
+        lines = client.subtitle_content(sub)
+        source = "官方字幕"
+    else:
+        mode = _resolve_asr_mode(cfg, args.asr)
+        if args.subtitle is not None:
+            print("[提示] 该视频无可用字幕，忽略 --subtitle 参数")
+        lines = _transcript_via_asr(client, cfg, bvid, page, mode)
+        source = f"ASR 转写（{mode}）"
+
+    if not lines:
+        raise SystemExit("转写结果为空，无法生成讲义")
+    print(f"文本共 {len(lines)} 句，时长 {fmt_ts(lines[-1]['to'])}，来源：{source}（模型：{cfg.llm.model}）\n")
+
+    text = generate_note(info, lines, cfg.llm, page=page, on_delta=sys.stdout.write,
+                         progress=lambda i, n: print(f"生成讲义：分块 {i}/{n}" if i else "合并分块草稿..."))
     print("\n")
 
     outdir = Path(args.outdir)
@@ -110,21 +176,31 @@ def cmd_config(args: argparse.Namespace) -> None:
             known = " / ".join(PROVIDERS)
             print(f"[提示] 未知 provider，可选项：{known}")
         print(f"bili.cookie  = {mask(cfg.bili.cookie)}")
+        print(f"asr.provider = {cfg.asr.provider or '(未设置)'}")
+        print(f"asr.api_key  = {mask(cfg.asr.api_key)}")
+        print(f"asr.base_url = {cfg.asr.base_url or '(provider 预设)'}")
+        print(f"asr.model    = {cfg.asr.model or '(provider 预设)'}")
+        print(f"asr.local_model = {cfg.asr.local_model}")
+        if cfg.asr.provider and cfg.asr.provider not in ASR_PROVIDERS:
+            print(f"[提示] 未知 asr provider，可选项：{' / '.join(ASR_PROVIDERS)}")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="bili2note",
-        description="B 站视频 → AI 结构化讲义（MVP：官方字幕 → LLM 提纯 → Markdown）",
+        description="B 站视频 → AI 结构化讲义（官方字幕/音频 ASR → LLM 提纯 → Markdown）",
     )
     parser.add_argument("--version", action="version", version=f"bili2note {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_note = sub.add_parser("note", help="抓取字幕并调用 LLM 生成 Markdown 讲义")
+    p_note = sub.add_parser("note", help="抓取字幕/ASR 转写并调用 LLM 生成 Markdown 讲义")
     p_note.add_argument("video", help="BV 号或视频 URL（可含 ?p=N 指定分P）")
     p_note.add_argument("-p", "--page", type=int, default=None, help="分P页码（默认取 URL 中的 p 或 1）")
     p_note.add_argument("-o", "--outdir", default="output", help="输出目录（默认 ./output）")
     p_note.add_argument("--subtitle", type=int, default=None, help="字幕编号（1-based，默认自动选中文）")
+    p_note.add_argument("--asr", choices=["none", "auto", "cloud", "local"], default="auto",
+                        help="语音识别模式：none=仅字幕 auto=有字幕用字幕否则 ASR（默认） "
+                             "cloud=强制云端 local=强制本地 faster-whisper")
     p_note.set_defaults(func=cmd_note)
 
     p_fetch = sub.add_parser("fetch", help="仅抓取字幕，保存为带时间戳的 txt")
