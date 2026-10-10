@@ -15,3 +15,4 @@ requires.md
 # 环境与密钥
 .env
 .uv-cache/
+config.toml

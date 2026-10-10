@@ -166,6 +166,27 @@ class BiliClient:
             raise BiliError("字幕内容为空")
         return body
 
+    def video_stream(self, bvid: str, page: int = 1, info: dict | None = None) -> tuple[str, float]:
+        """获取分P的 Dash 视频流：返回 (下载 URL, 该P时长秒)。选码率最低的视频流以省流量。"""
+        if info is None:
+            info = self.video_info(bvid)
+        pages = info.get("pages", [])
+        if page < 1 or page > len(pages):
+            raise BiliError(f"分P页码 {page} 超出范围（共 {len(pages)} P）")
+        cid = pages[page - 1]["cid"]
+        duration = float(pages[page - 1].get("duration") or info.get("duration") or 0)
+
+        params = self._wbi_sign({"bvid": bvid, "cid": cid, "aid": info["aid"], "fnval": 16, "fnver": 0, "qn": 0})
+        data = self._get("https://api.bilibili.com/x/player/wbi/playurl", params)
+        videos = (data.get("dash") or {}).get("video") or []
+        if not videos:
+            raise BiliError("未获取到 Dash 视频流（视频可能仅支持 Flash 播放或已被下架）")
+        best = min(videos, key=lambda v: v.get("bandwidth", 0))
+        url = best.get("baseUrl") or best.get("base_url") or ""
+        if not url:
+            raise BiliError("Dash 视频流缺少下载地址")
+        return url, duration
+
     def audio_stream(self, bvid: str, page: int = 1, info: dict | None = None) -> tuple[str, float]:
         """获取分P的 Dash 音频流：返回 (下载 URL, 该P时长秒)。选码率最低的音轨以省流量。"""
         if info is None:

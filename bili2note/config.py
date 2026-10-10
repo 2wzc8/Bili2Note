@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".bili2note"
@@ -25,6 +25,14 @@ PROVIDERS: dict[str, dict] = {
 ASR_PROVIDERS: dict[str, dict] = {
     "siliconflow": {"base_url": "https://api.siliconflow.cn/v1", "model": "FunAudioLLM/SenseVoiceSmall"},
     "openai": {"base_url": "https://api.openai.com/v1", "model": "whisper-1"},
+}
+
+# VLM（视觉语言模型）预设，用于画面信息提取（需支持 image_url 格式）
+VLM_PROVIDERS: dict[str, dict] = {
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+    "qwen": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-plus"},
+    "siliconflow": {"base_url": "https://api.siliconflow.cn/v1", "model": "Qwen/Qwen2-VL-7B-Instruct"},
+    "zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4v-flash"},
 }
 
 
@@ -53,10 +61,32 @@ class ASRConfig:
 
 
 @dataclass
+class VisionConfig:
+    provider: str = "openai"
+    api_key: str = ""
+    base_url: str = ""  # 空 = 取 provider 预设
+    model: str = ""     # 空 = 取 provider 预设
+    keyframe_interval: float = 5.0  # 关键帧间隔（秒）
+    max_frames: int = 50            # 最多抽取帧数
+
+
+@dataclass
+class KnowledgeConfig:
+    db_path: str = ""           # 向量库路径，空 = ~/.bili2note/knowledge
+    collection: str = "bili2note"
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    top_k: int = 5              # 每次检索返回的文档块数
+    embedding: str = "default"   # default=chromadb 内置 ONNX MiniLM；llmapi=用 LLM API 的 embedding endpoint
+
+
+@dataclass
 class Config:
     llm: LLMConfig
     bili: BiliConfig
     asr: ASRConfig
+    vision: VisionConfig = field(default_factory=VisionConfig)
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
 
 def _read_raw() -> dict:
@@ -94,7 +124,34 @@ def load_config() -> Config:
         local_model=os.environ.get(_ENV_PREFIX + "ASR_LOCAL_MODEL", asr_raw.get("local_model", "small")),
         language=os.environ.get(_ENV_PREFIX + "ASR_LANGUAGE", asr_raw.get("language", "")),
     )
-    return Config(llm=llm, bili=bili, asr=asr)
+    return Config(llm=llm, bili=bili, asr=asr, vision=_load_vision(raw), knowledge=_load_knowledge(raw))
+
+
+def _load_knowledge(raw: dict) -> KnowledgeConfig:
+    k_raw = raw.get("knowledge", {})
+    return KnowledgeConfig(
+        db_path=os.environ.get(_ENV_PREFIX + "KNOWLEDGE_DB", k_raw.get("db_path", "")),
+        collection=os.environ.get(_ENV_PREFIX + "KNOWLEDGE_COLLECTION", k_raw.get("collection", "bili2note")),
+        chunk_size=int(os.environ.get(_ENV_PREFIX + "KNOWLEDGE_CHUNK_SIZE", "") or k_raw.get("chunk_size", 500)),
+        chunk_overlap=int(os.environ.get(_ENV_PREFIX + "KNOWLEDGE_CHUNK_OVERLAP", "") or k_raw.get("chunk_overlap", 50)),
+        top_k=int(os.environ.get(_ENV_PREFIX + "KNOWLEDGE_TOP_K", "") or k_raw.get("top_k", 5)),
+        embedding=os.environ.get(_ENV_PREFIX + "KNOWLEDGE_EMBEDDING", k_raw.get("embedding", "default")),
+    )
+
+
+def _load_vision(raw: dict) -> VisionConfig:
+    """读取 vision 配置段，优先环境变量。"""
+    v_raw = raw.get("vision", {})
+    v_provider = os.environ.get(_ENV_PREFIX + "VISION_PROVIDER", v_raw.get("provider", "openai")).lower()
+    v_preset = VLM_PROVIDERS.get(v_provider, {})
+    return VisionConfig(
+        provider=v_provider,
+        api_key=os.environ.get(_ENV_PREFIX + "VISION_API_KEY", v_raw.get("api_key", "")),
+        base_url=os.environ.get(_ENV_PREFIX + "VISION_BASE_URL", v_raw.get("base_url", v_preset.get("base_url", ""))),
+        model=os.environ.get(_ENV_PREFIX + "VISION_MODEL", v_raw.get("model", v_preset.get("model", ""))),
+        keyframe_interval=float(os.environ.get(_ENV_PREFIX + "VISION_INTERVAL", "") or v_raw.get("keyframe_interval", 5.0)),
+        max_frames=int(os.environ.get(_ENV_PREFIX + "VISION_MAX_FRAMES", "") or v_raw.get("max_frames", 50)),
+    )
 
 
 def _escape(value: str) -> str:

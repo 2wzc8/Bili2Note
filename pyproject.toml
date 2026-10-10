@@ -1,7 +1,7 @@
 [project]
 name = "bili2note"
-version = "0.2.0"
-description = "Bilibili 视频 → AI 结构化讲义（字幕/音频 ASR → LLM 提纯 → Markdown）"
+version = "0.3.0"
+description = "Bilibili 视频 → AI 结构化讲义（字幕/音频 ASR/画面提取 → LLM 提纯 → Markdown）"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
@@ -13,6 +13,10 @@ dependencies = [
 # 本地语音识别引擎（国内安装模型需 HF 镜像：$env:HF_ENDPOINT="https://hf-mirror.com"）
 # av<17：faster-whisper 1.2 依赖的 av.open(metadata_errors=...) 在 av 17+ 被移除
 local = ["faster-whisper>=1.0", "av>=14,<17"]
+# 本地 OCR 引擎（画面文字识别，需 PaddleOCR）
+ocr = ["paddleocr>=2.7"]
+# RAG 知识库：chromadb 向量库（内置 ONNX MiniLM embedding）+ pymupdf PDF 读取
+rag = ["chromadb>=1.5", "pymupdf>=1.24"]
 
 [project.scripts]
 bili2note = "bili2note.cli:main"
